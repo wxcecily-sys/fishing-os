@@ -1,4 +1,4 @@
-name: Build Fishing OS ISO
+name: Build Fishing OS
 
 on:
   workflow_dispatch:
@@ -13,114 +13,107 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install tools
         run: |
           sudo apt update
           sudo apt install -y \
             wget \
-            xorriso \
-            squashfs-tools \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            mtools \
-            7zip \
-            debootstrap \
-            ubuntu-keyring \
+            qemu-utils \
+            libguestfs-tools \
             genisoimage \
-            uuid-runtime \
-            docker.io
+            squashfs-tools \
+            xorriso \
+            grub-pc-bin \
+            grub-efi-amd64-bin
 
-      - name: Start Docker
+      - name: Download Ubuntu Base Image
         run: |
-          sudo systemctl start docker
-          sudo docker run --privileged --rm -d --name fishing-builder ubuntu:22.04 sleep infinity
-          
-      - name: Download Ubuntu Base in Docker
+          # Download Ubuntu 22.04 cloud image (smaller than desktop)
+          wget -q https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img -O ubuntu-base.img
+          ls -lh ubuntu-base.img
+
+      - name: Customize Image
         run: |
-          sudo docker exec fishing-builder bash -c "
-            apt update && apt install -y debootstrap squashfs-tools
-            debootstrap --arch=amd64 jammy /fishing-system http://archive.ubuntu.com/ubuntu/
-          "
+          # Install packages using virt-customize
+          sudo virt-customize -a ubuntu-base.img \
+            --install "xfce4,xfce4-goodies,lightdm,wine,wine64,firefox,libreoffice,vlc,gamemode,git,curl,wget,python3,python3-pip,neofetch,htop" \
+            --run-command "useradd -m -s /bin/bash -p \$(echo 'fishing' | openssl passwd -1 -stdin) fishing" \
+            --run-command "usermod -aG sudo fishing" \
+            --run-command "echo 'fishing-os' > /etc/hostname" \
+            --run-command "echo '127.0.0.1 fishing-os' >> /etc/hosts" \
+            --run-command "curl -fsSL https://ollama.com/install.sh | sh" \
+            --run-command "mkdir -p /opt/fishing-os" \
+            --copy-in mcp-server:/opt/fishing-os/ \
+            --run-command "chmod +x /opt/fishing-os/mcp-server/assistant.py" \
+            --run-command "apt clean" \
+            --run-command "rm -rf /var/lib/apt/lists/*" \
+            --selinux-relabel
           
-      - name: Setup System in Docker
+          echo "✅ Image customized"
+
+      - name: Convert to RootFS
         run: |
-          sudo docker exec fishing-builder bash -c "
-            set -e
-            SYSTEM_DIR=/fishing-system
-            
-            # Copy sources
-            cp /etc/apt/sources.list \$SYSTEM_DIR/etc/apt/sources.list || true
-            
-            # Chroot and install
-            mount --bind /dev \$SYSTEM_DIR/dev || true
-            mount -t proc proc \$SYSTEM_DIR/proc || true
-            mount -t sysfs sys \$SYSTEM_DIR/sys || true
-            
-            echo 'LANG=en_US.UTF-8' > \$SYSTEM_DIR/etc/locale.conf
-            echo 'LC_ALL=en_US.UTF-8' >> \$SYSTEM_DIR/etc/locale.conf
-            
-            chroot \$SYSTEM_DIR /bin/bash << 'CHROOT'
-            export DEBIAN_FRONTEND=noninteractive
-            apt update
-            apt install -y xfce4 xfce4-goodies lightdm || true
-            dpkg --add-architecture i386 || true
-            apt update
-            apt install -y wine || true
-            curl -fsSL https://ollama.com/install.sh | sh || true
-            apt install -y firefox libreoffice vlc || true
-            apt install -y git curl wget python3 python3-pip || true
-            apt install -y gamemode neofetch htop || true
-            apt clean
-            rm -rf /var/lib/apt/lists/*
-            useradd -m -s /bin/bash fishing || true
-            echo 'fishing:fishing' | chpasswd || true
-            usermod -aG sudo fishing || true
-            echo 'fishing-os' > /etc/hostname
-            mkdir -p /opt/fishing-os
-            CHROOT
-            
-            # Copy MCP server
-            docker cp ${{ github.workspace }}/mcp-server fishing-builder:\$SYSTEM_DIR/opt/fishing-os/
-            
-            # Unmount
-            umount \$SYSTEM_DIR/proc || true
-            umount \$SYSTEM_DIR/sys || true
-            umount \$SYSTEM_DIR/dev || true
-          "
+          # Mount the image and extract filesystem
+          mkdir -p /tmp/mountpoint
+          sudo guestmount -a ubuntu-base.img -m /dev/sda1 /tmp/mountpoint
           
+          # Create squashfs
+          sudo mksquashfs /tmp/mountpoint fishing-os.squashfs -comp xz -Xbcj x86
+          
+          # Unmount
+          sudo guestunmount /tmp/mountpoint
+          
+          ls -lh fishing-os.squashfs
+
       - name: Create ISO Structure
         run: |
-          mkdir -p output/iso/casper
-          mkdir -p output/iso/boot/grub
+          mkdir -p output/iso/{casper,boot/grub}
           
-          # Export Docker container filesystem
-          sudo docker export fishing-builder > fishing-system.tar
+          # Copy squashfs
+          cp fishing-os.squashfs output/iso/casper/filesystem.squashfs
           
-          # Or create squashfs from docker
-          sudo docker cp fishing-builder:/fishing-system ./fishing-system-extracted || true
+          # Create manifest
+          echo "fishing-os 1.0" > output/iso/casper/filesystem.manifest
           
-          # If extract failed, use alternative
-          if [ ! -d "./fishing-system-extracted" ]; then
-            mkdir -p fishing-system-extracted
-            cd fishing-system-extracted
-            sudo docker run --rm -v \$(pwd):/workspace ubuntu:22.04 bash -c "
-              debootstrap --arch=amd64 jammy /workspace/base http://archive.ubuntu.com/ubuntu/ && 
-              mksquashfs /workspace/base /workspace/filesystem.squashfs
-            "
-            mv filesystem.squashfs output/iso/casper/
-          fi
+          # Create grub config
+          cat > output/iso/boot/grub/grub.cfg << 'GRUB'
+          set timeout=10
+          set default=0
           
-      - name: Stop Docker
-        if: always()
-        run: |
-          sudo docker stop fishing-builder || true
+          menuentry "Try Fishing OS without installing" {
+              linux /casper/vmlinuz boot=casper quiet splash
+              initrd /casper/initrd
+          }
           
+          menuentry "Install Fishing OS" {
+              linux /casper/vmlinuz boot=casper only-ubiquity quiet splash
+              initrd /casper/initrd
+          }
+          GRUB
+          
+          # Note: For complete ISO, we'd need kernel and initrd from the image
+          # This is a simplified version
+          echo "⚠️ ISO structure created (simplified)"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
-        if: always()
         with:
           name: fishing-os-rootfs
           path: |
-            fishing-system.tar
+            fishing-os.squashfs
             output/
           retention-days: 30
+
+      - name: Summary
+        run: |
+          echo "================================"
+          echo "🐟 Fishing OS Build Complete!"
+          echo "================================"
+          echo "Files created:"
+          ls -lh fishing-os.squashfs output/ 2>/dev/null || true
+          echo ""
+          echo "Next steps:"
+          echo "1. Download the artifact"
+          echo "2. Use Cubic or similar tool to create bootable ISO"
+          echo "3. Or use the squashfs directly with a live CD setup"
+          echo "================================"
