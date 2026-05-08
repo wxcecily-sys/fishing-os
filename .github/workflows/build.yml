@@ -1,0 +1,147 @@
+name: Build Fishing OS ISO
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            wget \
+            xorriso \
+            squashfs-tools \
+            grub-pc-bin \
+            grub-efi-amd64-bin \
+            mtools \
+            7zip \
+            debootstrap \
+            ubuntu-keyring \
+            genisoimage \
+            squashfs-tools \
+            uuid-runtime
+
+      - name: Download Ubuntu Base
+        run: |
+          mkdir -p workspace/fishing-system
+          cd workspace
+          debootstrap --arch=amd64 jammy fishing-system http://archive.ubuntu.com/ubuntu/
+
+      - name: Setup System
+        run: |
+          SYSTEM_DIR=workspace/fishing-system
+          
+          # Copy sources
+          sudo cp /etc/apt/sources.list $SYSTEM_DIR/etc/apt/sources.list
+          sudo cp /etc/resolv.conf $SYSTEM_DIR/etc/resolv.conf
+          
+          # Mount
+          sudo mount --bind /dev $SYSTEM_DIR/dev
+          sudo mount -t proc proc $SYSTEM_DIR/proc
+          sudo mount -t sysfs sys $SYSTEM_DIR/sys
+          
+          # Chroot install
+          sudo chroot $SYSTEM_DIR /bin/bash << 'CHROOT'
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+          
+          # Set locale
+          echo 'LANG=en_US.UTF-8' > /etc/locale.conf
+          echo 'LC_ALL=en_US.UTF-8' >> /etc/locale.conf
+          locale-gen en_US.UTF-8
+          
+          apt update
+          
+          # Install desktop
+          apt install -y xfce4 xfce4-goodies lightdm
+          
+          # Install Wine
+          dpkg --add-architecture i386
+          apt update
+          apt install -y wine wine64
+          
+          # Install Ollama
+          curl -fsSL https://ollama.com/install.sh | sh
+          
+          # Install apps
+          apt install -y firefox libreoffice vlc
+          
+          # Install dev tools
+          apt install -y git curl wget python3 python3-pip
+          
+          # Install game tools
+          apt install -y gamemode
+          
+          # Install system utils
+          apt install -y neofetch htop
+          
+          # Cleanup
+          apt clean
+          rm -rf /var/lib/apt/lists/*
+          
+          # Add fishing user
+          useradd -m -s /bin/bash fishing
+          echo 'fishing:fishing' | chpasswd
+          usermod -aG sudo fishing
+          
+          # Copy fishing files
+          mkdir -p /opt/fishing-os
+          cp -r /home/runner/work/fishing-os/fishing-os/mcp-server /opt/fishing-os/
+          chmod +x /opt/fishing-os/mcp-server/assistant.py
+          
+          # Set hostname
+          echo 'fishing-os' > /etc/hostname
+          echo '127.0.1.1 fishing-os' >> /etc/hosts
+          
+          # Write README for user
+          cat > /home/fishing/README.txt << 'README'
+          ================================
+          🐟 Fishing OS 1.0
+          ================================
+          
+          用户名: fishing
+          密码: fishing
+          
+          首次启动后运行:
+          1. sudo dpkg-reconfigure lightdm
+          2. sudo systemctl enable lightdm
+          3. /opt/fishing-os/start-ai.sh
+          
+          AI 助手需要先下载模型:
+          ollama pull qwen2.5:3b
+          README
+          
+          chown fishing:fishing /home/fishing/README.txt
+          EOF
+          
+          # Unmount
+          umount $SYSTEM_DIR/proc
+          umount $SYSTEM_DIR/sys
+          umount $SYSTEM_DIR/dev
+
+      - name: Create ISO Structure
+        run: |
+          mkdir -p output/iso/boot/grub
+          mkdir -p output/iso/casper
+          
+          # Copy kernel files
+          sudo cp workspace/fishing-system/boot/vmlinuz-* output/iso/casper/
+          sudo cp workspace/fishing-system/boot/initrd-* output/iso/casper/
+          
+          # Create filesystem.squashfs
+          sudo mksquashfs workspace/fishing-system output/iso/casper/filesystem.squashfs -info
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fishing-os-rootfs
+          path: workspace/
