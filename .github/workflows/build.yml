@@ -23,9 +23,10 @@ jobs:
           ENV LANG=en_US.UTF-8
           ENV LC_ALL=en_US.UTF-8
           
-          # 安装基础工具和桌面环境
+          # 安装基础工具和 zstd (Ollama 需要)
           RUN apt update && apt install -y \
             locales \
+            zstd \
             && locale-gen en_US.UTF-8 \
             && apt install -y \
             xfce4 \
@@ -51,7 +52,7 @@ jobs:
             wine64 \
             || true
           
-          # 安装 Ollama (本地 AI)
+          # 安装 Ollama (本地 AI) - 现在 zstd 已安装
           RUN curl -fsSL https://ollama.com/install.sh | sh || true
           
           # 创建 fishing 用户
@@ -59,9 +60,8 @@ jobs:
             && echo 'fishing:fishing' | chpasswd || true \
             && usermod -aG sudo fishing || true
           
-          # 设置主机名
-          RUN echo 'fishing-os' > /etc/hostname \
-            && echo '127.0.1.1 fishing-os' >> /etc/hosts
+          # 设置主机名 (只写 hostname，不写 hosts)
+          RUN echo 'fishing-os' > /etc/hostname
           
           # 创建 MCP 目录
           RUN mkdir -p /opt/fishing-os/mcp-server
@@ -89,7 +89,7 @@ jobs:
 
       - name: Create ISO Structure (Optional)
         run: |
-          # 创建简单的 ISO 结构（用户可后续用 Cubic 等工具打造完整 ISO）
+          # 创建简单的 ISO 结构
           mkdir -p output/iso/casper
           mkdir -p output/iso/boot/grub
           
