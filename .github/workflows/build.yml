@@ -1,4 +1,4 @@
-name: Build Fishing OS RootFS
+name: Build Fishing OS RootFS (Lite)
 
 on:
   workflow_dispatch:
@@ -13,17 +13,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build RootFS with Docker
+      - name: Build RootFS with Docker (Lite Version)
         run: |
-          # 创建 Dockerfile
+          # 创建精简版 Dockerfile
           cat > Dockerfile << 'EOF'
           FROM ubuntu:22.04
           
           ENV DEBIAN_FRONTEND=noninteractive
           ENV LANG=en_US.UTF-8
           ENV LC_ALL=en_US.UTF-8
+          ENV FISHING_OS_LITE=1
           
-          # 安装基础工具和 zstd (Ollama 需要)
+          # 安装基础工具和桌面环境 (精简版)
           RUN apt update && apt install -y \
             locales \
             zstd \
@@ -33,7 +34,6 @@ jobs:
             xfce4-goodies \
             lightdm \
             firefox \
-            libreoffice \
             vlc \
             gamemode \
             git \
@@ -44,6 +44,8 @@ jobs:
             neofetch \
             htop \
             software-properties-common \
+            curl \
+            wget \
             && add-apt-repository universe \
             && dpkg --add-architecture i386 \
             && apt update \
@@ -52,84 +54,71 @@ jobs:
             wine64 \
             || true
           
-          # 安装 Ollama (本地 AI) - 现在 zstd 已安装
-          RUN curl -fsSL https://ollama.com/install.sh | sh || true
+          # 不安装 Ollama (节省空间，用户可后续安装)
+          # RUN curl -fsSL https://ollama.com/install.sh | sh || true
           
           # 创建 fishing 用户
           RUN useradd -m -s /bin/bash fishing || true \
             && echo 'fishing:fishing' | chpasswd || true \
             && usermod -aG sudo fishing || true
           
-          # 设置主机名 (只写 hostname，不写 hosts)
-          RUN echo 'fishing-os' > /etc/hostname
+          # 设置主机名
+          RUN echo 'fishing-os-lite' > /etc/hostname
           
           # 创建 MCP 目录
           RUN mkdir -p /opt/fishing-os/mcp-server
           
-          # 清理
+          # 清理 (重要！减小体积)
           RUN apt clean \
+            && apt autoremove -y \
             && rm -rf /var/lib/apt/lists/* \
             && rm -rf /tmp/* \
-            && rm -rf /var/tmp/*
+            && rm -rf /var/tmp/* \
+            && rm -rf /usr/share/doc/* \
+            && rm -rf /usr/share/man/* \
+            && rm -rf /usr/share/locale/* \
+            && find /var/log -type f -delete \
+            && find /var/cache -type f -delete
           
           CMD ["/bin/bash"]
           EOF
           
           # 构建 Docker 镜像
-          docker build -t fishing-os:latest .
+          docker build -t fishing-os-lite:latest .
           
           # 创建容器并导出
-          docker create --name fishing-container fishing-os:latest
+          docker create --name fishing-container fishing-os-lite:latest
           docker export fishing-container -o fishing-os-rootfs.tar
           
           # 压缩
-          gzip fishing-os-rootfs.tar
+          gzip -9 fishing-os-rootfs.tar
           
           ls -lh fishing-os-rootfs.tar.gz
-
-      - name: Create ISO Structure (Optional)
-        run: |
-          # 创建简单的 ISO 结构
-          mkdir -p output/iso/casper
-          mkdir -p output/iso/boot/grub
-          
-          # 复制 rootfs
-          cp fishing-os-rootfs.tar.gz output/iso/casper/filesystem.tar.gz
-          
-          # 创建 GRUB 配置
-          cat > output/iso/boot/grub/grub.cfg << 'GRUB'
-          set timeout=10
-          set default=0
-          
-          menuentry "Try Fishing OS" {
-              linux /casper/vmlinuz boot=casper quiet splash
-              initrd /casper/initrd
-          }
-          GRUB
-          
-          echo "⚠️ 注意：这是一个简化的 rootfs，完整 ISO 需要额外步骤"
 
       - name: Generate Build Info
         run: |
           cat > build-info.txt << 'INFO'
           ========================================
-          🐟 Fishing OS 1.0 - Build Artifact
+          🐟 Fishing OS 1.0 Lite - Build Artifact
           ========================================
           
           构建时间: $(date)
-          构建方式: GitHub Actions + Docker
+          构建方式: GitHub Actions + Docker (Lite)
+          预计大小: ~2GB (压缩后 ~700MB-1GB)
           
           包含内容:
           - Ubuntu 22.04 基础系统
-          - XFCE4 桌面环境
+          - XFCE4 桌面环境 (轻量)
           - Wine (Windows 兼容层)
           - Firefox 浏览器
-          - LibreOffice 办公套件
           - VLC 多媒体播放器
           - GameMode 游戏优化
           - 开发工具 (Git, Python3, etc.)
-          - Ollama (本地 AI 引擎)
-          - MCP Server (AI 助手框架)
+          
+          ⚠️ 精简版不包含:
+          - LibreOffice (可后续安装: sudo apt install libreoffice)
+          - Ollama (可后续安装: curl -fsSL https://ollama.com/install.sh | sh)
+          - MCP Server (已包含框架，需配置)
           
           使用方法:
           1. 下载 fishing-os-rootfs.tar.gz
@@ -141,6 +130,10 @@ jobs:
           - 用户名: fishing
           - 密码: fishing
           
+          恢复完整版:
+          - 安装 LibreOffice: sudo apt install libreoffice
+          - 安装 Ollama: curl -fsSL https://ollama.com/install.sh | sh
+          
           ========================================
           INFO
           
@@ -149,10 +142,9 @@ jobs:
       - name: Upload RootFS Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fishing-os-rootfs
+          name: fishing-os-rootfs-lite
           path: |
             fishing-os-rootfs.tar.gz
-            output/
             build-info.txt
             mcp-server/
           retention-days: 30
@@ -160,16 +152,22 @@ jobs:
       - name: Build Summary
         run: |
           echo "================================"
-          echo "🐟 Fishing OS Build Complete!"
+          echo "🐟 Fishing OS Lite Build Complete!"
           echo "================================"
-          echo "✅ RootFS 已生成"
+          echo "✅ RootFS 已生成 (精简版)"
           echo "✅ 大小: $(ls -lh fishing-os-rootfs.tar.gz | awk '{print $5}')"
           echo ""
-          echo "📦 下载地址:"
-          echo "   GitHub Actions → Artifacts → fishing-os-rootfs"
+          echo "📦 包含:"
+          echo "   - XFCE4 桌面"
+          echo "   - Wine (exe 兼容)"
+          echo "   - Firefox"
+          echo "   - VLC"
+          echo "   - 开发工具"
           echo ""
-          echo "📍 下一步:"
-          echo "   1. 下载 Artifact"
-          echo "   2. 解压得到 rootfs"
-          echo "   3. 用 Cubic 或手动打包成 ISO"
+          echo "📦 不包含 (节省空间):"
+          echo "   - LibreOffice (可后续装)"
+          echo "   - Ollama (可后续装)"
+          echo ""
+          echo "📦 下载地址:"
+          echo "   GitHub Actions → Artifacts → fishing-os-rootfs-lite"
           echo "================================"
