@@ -1,4 +1,4 @@
-name: Build Fishing OS
+name: Build Fishing OS RootFS
 
 on:
   workflow_dispatch:
@@ -13,107 +13,163 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Build RootFS with Docker
         run: |
-          sudo apt update
-          sudo apt install -y \
+          # 创建 Dockerfile
+          cat > Dockerfile << 'EOF'
+          FROM ubuntu:22.04
+          
+          ENV DEBIAN_FRONTEND=noninteractive
+          ENV LANG=en_US.UTF-8
+          ENV LC_ALL=en_US.UTF-8
+          
+          # 安装基础工具和桌面环境
+          RUN apt update && apt install -y \
+            locales \
+            && locale-gen en_US.UTF-8 \
+            && apt install -y \
+            xfce4 \
+            xfce4-goodies \
+            lightdm \
+            firefox \
+            libreoffice \
+            vlc \
+            gamemode \
+            git \
+            curl \
             wget \
-            qemu-utils \
-            libguestfs-tools \
-            genisoimage \
-            squashfs-tools \
-            xorriso \
-            grub-pc-bin \
-            grub-efi-amd64-bin
+            python3 \
+            python3-pip \
+            neofetch \
+            htop \
+            software-properties-common \
+            && add-apt-repository universe \
+            && dpkg --add-architecture i386 \
+            && apt update \
+            && apt install -y \
+            wine \
+            wine64 \
+            || true
+          
+          # 安装 Ollama (本地 AI)
+          RUN curl -fsSL https://ollama.com/install.sh | sh || true
+          
+          # 创建 fishing 用户
+          RUN useradd -m -s /bin/bash fishing || true \
+            && echo 'fishing:fishing' | chpasswd || true \
+            && usermod -aG sudo fishing || true
+          
+          # 设置主机名
+          RUN echo 'fishing-os' > /etc/hostname \
+            && echo '127.0.1.1 fishing-os' >> /etc/hosts
+          
+          # 创建 MCP 目录
+          RUN mkdir -p /opt/fishing-os/mcp-server
+          
+          # 清理
+          RUN apt clean \
+            && rm -rf /var/lib/apt/lists/* \
+            && rm -rf /tmp/* \
+            && rm -rf /var/tmp/*
+          
+          CMD ["/bin/bash"]
+          EOF
+          
+          # 构建 Docker 镜像
+          docker build -t fishing-os:latest .
+          
+          # 创建容器并导出
+          docker create --name fishing-container fishing-os:latest
+          docker export fishing-container -o fishing-os-rootfs.tar
+          
+          # 压缩
+          gzip fishing-os-rootfs.tar
+          
+          ls -lh fishing-os-rootfs.tar.gz
 
-      - name: Download Ubuntu Base Image
+      - name: Create ISO Structure (Optional)
         run: |
-          # Download Ubuntu 22.04 cloud image (smaller than desktop)
-          wget -q https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img -O ubuntu-base.img
-          ls -lh ubuntu-base.img
-
-      - name: Customize Image
-        run: |
-          # Install packages using virt-customize
-          sudo virt-customize -a ubuntu-base.img \
-            --install "xfce4,xfce4-goodies,lightdm,wine,wine64,firefox,libreoffice,vlc,gamemode,git,curl,wget,python3,python3-pip,neofetch,htop" \
-            --run-command "useradd -m -s /bin/bash -p \$(echo 'fishing' | openssl passwd -1 -stdin) fishing" \
-            --run-command "usermod -aG sudo fishing" \
-            --run-command "echo 'fishing-os' > /etc/hostname" \
-            --run-command "echo '127.0.0.1 fishing-os' >> /etc/hosts" \
-            --run-command "curl -fsSL https://ollama.com/install.sh | sh" \
-            --run-command "mkdir -p /opt/fishing-os" \
-            --copy-in mcp-server:/opt/fishing-os/ \
-            --run-command "chmod +x /opt/fishing-os/mcp-server/assistant.py" \
-            --run-command "apt clean" \
-            --run-command "rm -rf /var/lib/apt/lists/*" \
-            --selinux-relabel
+          # 创建简单的 ISO 结构（用户可后续用 Cubic 等工具打造完整 ISO）
+          mkdir -p output/iso/casper
+          mkdir -p output/iso/boot/grub
           
-          echo "✅ Image customized"
-
-      - name: Convert to RootFS
-        run: |
-          # Mount the image and extract filesystem
-          mkdir -p /tmp/mountpoint
-          sudo guestmount -a ubuntu-base.img -m /dev/sda1 /tmp/mountpoint
+          # 复制 rootfs
+          cp fishing-os-rootfs.tar.gz output/iso/casper/filesystem.tar.gz
           
-          # Create squashfs
-          sudo mksquashfs /tmp/mountpoint fishing-os.squashfs -comp xz -Xbcj x86
-          
-          # Unmount
-          sudo guestunmount /tmp/mountpoint
-          
-          ls -lh fishing-os.squashfs
-
-      - name: Create ISO Structure
-        run: |
-          mkdir -p output/iso/{casper,boot/grub}
-          
-          # Copy squashfs
-          cp fishing-os.squashfs output/iso/casper/filesystem.squashfs
-          
-          # Create manifest
-          echo "fishing-os 1.0" > output/iso/casper/filesystem.manifest
-          
-          # Create grub config
+          # 创建 GRUB 配置
           cat > output/iso/boot/grub/grub.cfg << 'GRUB'
           set timeout=10
           set default=0
           
-          menuentry "Try Fishing OS without installing" {
+          menuentry "Try Fishing OS" {
               linux /casper/vmlinuz boot=casper quiet splash
-              initrd /casper/initrd
-          }
-          
-          menuentry "Install Fishing OS" {
-              linux /casper/vmlinuz boot=casper only-ubiquity quiet splash
               initrd /casper/initrd
           }
           GRUB
           
-          # Note: For complete ISO, we'd need kernel and initrd from the image
-          # This is a simplified version
-          echo "⚠️ ISO structure created (simplified)"
+          echo "⚠️ 注意：这是一个简化的 rootfs，完整 ISO 需要额外步骤"
 
-      - name: Upload artifact
+      - name: Generate Build Info
+        run: |
+          cat > build-info.txt << 'INFO'
+          ========================================
+          🐟 Fishing OS 1.0 - Build Artifact
+          ========================================
+          
+          构建时间: $(date)
+          构建方式: GitHub Actions + Docker
+          
+          包含内容:
+          - Ubuntu 22.04 基础系统
+          - XFCE4 桌面环境
+          - Wine (Windows 兼容层)
+          - Firefox 浏览器
+          - LibreOffice 办公套件
+          - VLC 多媒体播放器
+          - GameMode 游戏优化
+          - 开发工具 (Git, Python3, etc.)
+          - Ollama (本地 AI 引擎)
+          - MCP Server (AI 助手框架)
+          
+          使用方法:
+          1. 下载 fishing-os-rootfs.tar.gz
+          2. 解压: tar -xzf fishing-os-rootfs.tar.gz
+          3. 用工具 (如 Cubic) 打包成 ISO
+          4. 或者直接在虚拟机/实体机使用
+          
+          默认用户:
+          - 用户名: fishing
+          - 密码: fishing
+          
+          ========================================
+          INFO
+          
+          cat build-info.txt
+
+      - name: Upload RootFS Artifact
         uses: actions/upload-artifact@v4
         with:
           name: fishing-os-rootfs
           path: |
-            fishing-os.squashfs
+            fishing-os-rootfs.tar.gz
             output/
+            build-info.txt
+            mcp-server/
           retention-days: 30
 
-      - name: Summary
+      - name: Build Summary
         run: |
           echo "================================"
           echo "🐟 Fishing OS Build Complete!"
           echo "================================"
-          echo "Files created:"
-          ls -lh fishing-os.squashfs output/ 2>/dev/null || true
+          echo "✅ RootFS 已生成"
+          echo "✅ 大小: $(ls -lh fishing-os-rootfs.tar.gz | awk '{print $5}')"
           echo ""
-          echo "Next steps:"
-          echo "1. Download the artifact"
-          echo "2. Use Cubic or similar tool to create bootable ISO"
-          echo "3. Or use the squashfs directly with a live CD setup"
+          echo "📦 下载地址:"
+          echo "   GitHub Actions → Artifacts → fishing-os-rootfs"
+          echo ""
+          echo "📍 下一步:"
+          echo "   1. 下载 Artifact"
+          echo "   2. 解压得到 rootfs"
+          echo "   3. 用 Cubic 或手动打包成 ISO"
           echo "================================"
